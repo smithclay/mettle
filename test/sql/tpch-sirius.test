@@ -1,0 +1,167 @@
+# Sirius-style TPC-H surface coverage.
+
+statement ok
+CALL gpu_buffer_init('1 GB', '2 GB', pinned_memory_size = '4 GB');
+
+statement ok
+CREATE TABLE customer(c_custkey INTEGER, c_mktsegment VARCHAR);
+CREATE TABLE orders(o_orderkey INTEGER, o_custkey INTEGER, o_orderdate DATE, o_shippriority INTEGER);
+CREATE TABLE lineitem(l_orderkey INTEGER, l_extendedprice DOUBLE, l_discount DOUBLE, l_shipdate DATE);
+INSERT INTO customer VALUES
+  (1, 'HOUSEHOLD'),
+  (2, 'AUTOMOBILE'),
+  (3, 'HOUSEHOLD');
+INSERT INTO orders VALUES
+  (101, 1, DATE '1995-03-01', 1),
+  (102, 2, DATE '1995-03-01', 2),
+  (103, 3, DATE '1995-04-01', 3),
+  (104, 3, DATE '1995-03-10', 2);
+INSERT INTO lineitem VALUES
+  (101, 100.0, 0.10, DATE '1995-04-01'),
+  (101, 50.0, 0.00, DATE '1995-04-03'),
+  (102, 80.0, 0.20, DATE '1995-04-01'),
+  (103, 70.0, 0.00, DATE '1995-04-10'),
+  (104, 40.0, 0.25, DATE '1995-02-01'),
+  (104, 30.0, 0.10, DATE '1995-04-10');
+
+query IRTI rowsort
+CALL gpu_processing('select
+  l.l_orderkey,
+  sum(l.l_extendedprice * (1 - l.l_discount)) as revenue,
+  o.o_orderdate,
+  o.o_shippriority
+from
+  customer c,
+  orders o,
+  lineitem l
+where
+  c.c_mktsegment = ''HOUSEHOLD''
+  and c.c_custkey = o.o_custkey
+  and l.l_orderkey = o.o_orderkey
+  and o.o_orderdate < date ''1995-03-25''
+  and l.l_shipdate > date ''1995-03-25''
+group by
+  l.l_orderkey,
+  o.o_orderdate,
+  o.o_shippriority
+order by
+  revenue desc,
+  o.o_orderdate
+limit 10;');
+----
+101 140.0 1995-03-01 1
+104 27.0 1995-03-10 2
+
+statement ok
+INSERT INTO orders VALUES
+  (105, 1, DATE '1995-03-25', 4),
+  (106, 1, DATE '1995-03-24', 5);
+INSERT INTO lineitem VALUES
+  (105, 500.0, 0.00, DATE '1995-03-26'),
+  (106,  60.0, 0.00, DATE '1995-03-25');
+
+query IRTI rowsort
+CALL gpu_processing('select
+  l.l_orderkey,
+  sum(l.l_extendedprice * (1 - l.l_discount)) as revenue,
+  o.o_orderdate,
+  o.o_shippriority
+from
+  customer c
+  join orders o on c.c_custkey = o.o_custkey
+  join lineitem l on l.l_orderkey = o.o_orderkey
+where
+  c.c_mktsegment = ''HOUSEHOLD''
+  and o.o_orderdate < date ''1995-03-25''
+  and l.l_shipdate > date ''1995-03-25''
+group by
+  l.l_orderkey,
+  o.o_orderdate,
+  o.o_shippriority
+order by
+  revenue desc,
+  o.o_orderdate
+limit 10;');
+----
+101 140.0 1995-03-01 1
+104 27.0 1995-03-10 2
+
+query IRTI rowsort
+CALL gpu_processing('select
+  li.l_orderkey,
+  sum(li.l_extendedprice * (1 - li.l_discount)) as revenue,
+  ord.o_orderdate,
+  ord.o_shippriority
+from
+  customer as cust
+  join orders as ord on ord.o_custkey = cust.c_custkey
+  join lineitem as li on ord.o_orderkey = li.l_orderkey
+where
+  cust.c_mktsegment = ''HOUSEHOLD''
+  AND ord.o_orderdate < date ''1995-03-25''
+  AND li.l_shipdate > date ''1995-03-25''
+group by
+  li.l_orderkey,
+  ord.o_orderdate,
+  ord.o_shippriority
+order by
+  revenue desc,
+  ord.o_orderdate
+limit 10;');
+----
+101 140.0 1995-03-01 1
+104 27.0 1995-03-10 2
+
+query IRTI rowsort
+CALL gpu_processing('select
+  l.l_orderkey,
+  sum(l.l_extendedprice * (1 - l.l_discount)) as revenue,
+  o.o_orderdate,
+  o.o_shippriority
+from
+  customer c
+  join orders o on c.c_custkey = o.o_custkey
+  join lineitem l on l.l_orderkey = o.o_orderkey
+where
+  c.c_mktsegment = ''HOUSEHOLD''
+  and o.o_orderdate < date ''1995-03-25''
+  and l.l_shipdate > date ''1995-03-25''
+group by
+  l.l_orderkey,
+  o.o_orderdate,
+  o.o_shippriority
+order by
+  revenue desc,
+  o.o_orderdate
+limit 10;');
+----
+101 140.0 1995-03-01 1
+104 27.0 1995-03-10 2
+
+query IRTI rowsort
+CALL gpu_processing('select
+  l.l_orderkey,
+  sum(l.l_extendedprice * (1 - l.l_discount)) as revenue,
+  o.o_orderdate,
+  o.o_shippriority
+from
+  customer c,
+  orders o,
+  lineitem l
+where
+  c.c_mktsegment = ''HOUSEHOLD''
+  and c.c_custkey = o.o_custkey
+  and l.l_orderkey = o.o_orderkey
+  and o.o_orderdate < date ''1995-03-25''
+  and l.l_shipdate > date ''1995-03-25''
+group by
+  l.l_orderkey,
+  o.o_orderdate,
+  o.o_shippriority
+order by
+  revenue desc,
+  o.o_orderdate
+limit 10;');
+----
+101 140.0 1995-03-01 1
+104 27.0 1995-03-10 2

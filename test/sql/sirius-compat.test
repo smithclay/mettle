@@ -1,0 +1,161 @@
+# Sirius-style public surface coverage for mettle.
+
+statement ok
+CREATE TABLE numbers(value INTEGER);
+INSERT INTO numbers VALUES (1), (2), (3);
+
+statement error call gpu_buffer_init before gpu_processing
+CALL gpu_processing('SELECT 42 AS answer');
+
+statement ok
+CALL gpu_buffer_init('1 GB', '2 GB', pinned_memory_size = '4 GB');
+
+query I rowsort
+CALL gpu_processing('SELECT 42 AS answer');
+----
+42
+
+query II rowsort
+CALL gpu_processing('SELECT value, value * 10 AS scaled FROM numbers ORDER BY value');
+----
+1 10
+2 20
+3 30
+
+query II rowsort
+CALL gpu_processing('SELECT value, value + 5 AS shifted FROM numbers ORDER BY value');
+----
+1 6
+2 7
+3 8
+
+query II rowsort
+CALL gpu_processing('SELECT value, value * 10 AS scaled FROM numbers WHERE value > 1 ORDER BY value');
+----
+2 20
+3 30
+
+query II rowsort
+CALL gpu_processing('WITH filtered AS (SELECT value FROM numbers WHERE value >= 2) SELECT value, value * 100 AS scaled FROM filtered ORDER BY value');
+----
+2 200
+3 300
+
+statement ok
+CREATE TABLE big_numbers(value BIGINT);
+INSERT INTO big_numbers VALUES (10), (20), (30);
+
+query II rowsort
+CALL gpu_processing('SELECT value, value + 5 AS shifted FROM big_numbers WHERE value >= 20 ORDER BY value');
+----
+20 25
+30 35
+
+statement ok
+CREATE TABLE prices(value FLOAT);
+INSERT INTO prices VALUES (1.0), (2.0), (3.5);
+
+query RR rowsort
+CALL gpu_processing('SELECT value, value * 1.5 AS scaled FROM prices WHERE value >= 2.0 ORDER BY value');
+----
+2.0 3.0
+3.5 5.25
+
+statement ok
+CREATE TABLE dated_orders(order_date DATE);
+INSERT INTO dated_orders VALUES
+  (DATE '1995-03-01'),
+  (DATE '1995-03-25'),
+  (DATE '1995-04-01');
+
+query T rowsort
+CALL gpu_processing('SELECT order_date FROM dated_orders WHERE order_date >= DATE ''1995-03-25'' ORDER BY order_date');
+----
+1995-03-25
+1995-04-01
+
+statement ok
+CREATE TABLE event_log(event_ts TIMESTAMP);
+INSERT INTO event_log VALUES
+  (TIMESTAMP '1995-03-01 08:00:00'),
+  (TIMESTAMP '1995-03-01 12:34:56'),
+  (TIMESTAMP '1995-04-01 01:02:03');
+
+query T rowsort
+CALL gpu_processing('SELECT event_ts FROM event_log WHERE event_ts > TIMESTAMP ''1995-03-01 12:00:00'' ORDER BY event_ts');
+----
+1995-03-01 12:34:56
+1995-04-01 01:02:03
+
+statement ok
+CREATE TABLE customer(c_custkey INTEGER, c_mktsegment VARCHAR);
+CREATE TABLE orders(o_orderkey INTEGER, o_custkey INTEGER, o_orderdate DATE, o_shippriority INTEGER);
+CREATE TABLE lineitem(l_orderkey INTEGER, l_extendedprice DOUBLE, l_discount DOUBLE, l_shipdate DATE);
+INSERT INTO customer VALUES
+  (1, 'HOUSEHOLD'),
+  (2, 'AUTOMOBILE'),
+  (3, 'HOUSEHOLD');
+INSERT INTO orders VALUES
+  (101, 1, DATE '1995-03-01', 1),
+  (102, 2, DATE '1995-03-01', 2),
+  (103, 3, DATE '1995-04-01', 3),
+  (104, 3, DATE '1995-03-10', 2);
+INSERT INTO lineitem VALUES
+  (101, 100.0, 0.10, DATE '1995-04-01'),
+  (101, 50.0, 0.00, DATE '1995-04-03'),
+  (102, 80.0, 0.20, DATE '1995-04-01'),
+  (103, 70.0, 0.00, DATE '1995-04-10'),
+  (104, 40.0, 0.25, DATE '1995-02-01'),
+  (104, 30.0, 0.10, DATE '1995-04-10');
+
+query IRI rowsort
+CALL gpu_processing('select
+  l.l_orderkey,
+  sum(l.l_extendedprice * (1 - l.l_discount)) as revenue,
+  o.o_shippriority
+from
+  customer c,
+  orders o,
+  lineitem l
+where
+  c.c_mktsegment = ''HOUSEHOLD''
+  and c.c_custkey = o.o_custkey
+  and l.l_orderkey = o.o_orderkey
+  and o.o_orderdate < date ''1995-03-25''
+  and l.l_shipdate > date ''1995-03-25''
+group by
+  l.l_orderkey,
+  o.o_shippriority
+order by
+  revenue desc,
+  l.l_orderkey
+limit 10;');
+----
+101 140.0 1
+104 27.0 2
+
+query IRI rowsort
+CALL gpu_processing('select
+  l.l_orderkey,
+  sum(l.l_extendedprice * (1 - l.l_discount)) as revenue,
+  o.o_shippriority
+from
+  customer c,
+  orders o,
+  lineitem l
+where
+  c.c_mktsegment = ''HOUSEHOLD''
+  and c.c_custkey = o.o_custkey
+  and l.l_orderkey = o.o_orderkey
+  and o.o_orderdate < date ''1995-03-25''
+  and l.l_shipdate > date ''1995-03-25''
+group by
+  l.l_orderkey,
+  o.o_shippriority
+order by
+  revenue desc,
+  l.l_orderkey
+limit 10;');
+----
+101 140.0 1
+104 27.0 2

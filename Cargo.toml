@@ -1,0 +1,31 @@
+[package]
+name = "mettle"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "DuckDB Rust extension template for Sirius-style Metal offload"
+
+[features]
+default = []
+loadable-extension = ["duckdb/loadable-extension"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+duckdb = { version = "1.4.4", features = ["vtab-arrow", "vscalar", "vscalar-arrow"] }
+serde_json = "1"
+sqlparser = "0.55"
+
+[dev-dependencies]
+duckdb = { version = "1.4.4", features = ["bundled", "vtab-arrow", "vscalar", "vscalar-arrow"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3.2"
+objc2-metal = "0.3.2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = "debuginfo"
