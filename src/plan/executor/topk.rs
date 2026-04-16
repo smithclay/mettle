@@ -35,13 +35,18 @@ pub(super) struct CandidateGroupedTopKPlan {
     pub(super) aggregate_key_column: String,
 }
 
+/// Which GPU top-K execution strategy to use on top of a candidate join plan.
+///
+/// `None` at the call site means "no candidate top-K plan available; use the
+/// default non-candidate path."
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ExperimentalGroupedTopKMode {
+pub(super) enum CandidateTopKMode {
+    /// Compact matches + generic aggregate-top-K kernel. Used when the sum
+    /// expression is not a fused `price * (1 - discount)` form.
     CandidateCompact,
-    SlotValuesGpuTopK,
+    /// Fused revenue projection + dense-slot aggregation + dense top-K kernel.
+    /// Selected when the sum expression matches the fused-revenue pattern.
     SlotFusedGpuTopK,
-    SlotFusedCpuTopK,
-    GenericGroupedAggregate,
 }
 
 pub(super) struct RepresentativeMaterializePlan {
@@ -80,7 +85,7 @@ pub(super) fn grouped_topk_plan(plan: &GpuPlan) -> Option<GroupedTopKPlan> {
         Some(ob) if !ob.descending => grouped_plan
             .group_by
             .iter()
-            .position(|group_col| ob.column.eq_ignore_ascii_case(group_col)),
+            .position(|group_col| ob.column.eq_ignore_ascii_case(&group_col.column)),
         Some(_) => return None,
         None => None,
     };
@@ -94,23 +99,6 @@ pub(super) fn grouped_topk_plan(plan: &GpuPlan) -> Option<GroupedTopKPlan> {
     })
 }
 
-pub(super) fn experimental_grouped_topk_mode() -> Option<ExperimentalGroupedTopKMode> {
-    match std::env::var("METTLE_EXPERIMENTAL_GROUPED_TOPK_MODE") {
-        Ok(mode) => match mode.as_str() {
-            "candidate" => Some(ExperimentalGroupedTopKMode::CandidateCompact),
-            "slot" => Some(ExperimentalGroupedTopKMode::SlotValuesGpuTopK),
-            "slot_fused" => Some(ExperimentalGroupedTopKMode::SlotFusedGpuTopK),
-            "slot_cpu" => Some(ExperimentalGroupedTopKMode::SlotFusedCpuTopK),
-            "generic" => Some(ExperimentalGroupedTopKMode::GenericGroupedAggregate),
-            _ => None,
-        },
-        Err(_) if std::env::var_os("METTLE_EXPERIMENTAL_CANDIDATE_TOPK").is_some() => {
-            Some(ExperimentalGroupedTopKMode::CandidateCompact)
-        }
-        Err(_) => None,
-    }
-}
-
 pub(super) fn collect_expr_source_indices(
     expr: &GpuExpr,
     plan: &GpuPlan,
@@ -119,7 +107,7 @@ pub(super) fn collect_expr_source_indices(
 ) -> Option<()> {
     match expr {
         GpuExpr::Column(name) => {
-            if name != "*" {
+            if !name.is_wildcard() {
                 let (source_idx, _) = resolve_column_name_in_sources(name, plan, pinned_tables)?;
                 sources.insert(source_idx);
             }
@@ -203,32 +191,6 @@ pub(super) fn candidate_grouped_topk_plan(
         representative_key_column,
         aggregate_key_column,
     })
-}
-
-pub(super) fn grouped_candidate_better(
-    lhs_sum: f32,
-    lhs_secondary: i32,
-    lhs_row_id: u32,
-    rhs_sum: f32,
-    rhs_secondary: i32,
-    rhs_row_id: u32,
-    use_secondary: bool,
-) -> bool {
-    if lhs_sum > rhs_sum {
-        return true;
-    }
-    if lhs_sum < rhs_sum {
-        return false;
-    }
-    if use_secondary {
-        if lhs_secondary < rhs_secondary {
-            return true;
-        }
-        if lhs_secondary > rhs_secondary {
-            return false;
-        }
-    }
-    lhs_row_id < rhs_row_id
 }
 
 pub(super) fn build_representative_materialize_plan(
@@ -374,7 +336,7 @@ pub(super) fn is_grouped_topk_pilot(
         else {
             return true;
         };
-        !pinned_tables[table_idx].is_pilot_supported_column(column_name_only(name))
+        !pinned_tables[table_idx].is_pilot_supported_column(column_name_only(&name.column))
             || matches!(
                 col,
                 PinnedColumn::DictionaryI32 { .. } | PinnedColumn::Float64(_)
@@ -387,7 +349,7 @@ pub(super) fn is_grouped_topk_pilot(
         GpuExpr::Column(name) => !agg
             .group_by
             .iter()
-            .any(|group_col| group_col.eq_ignore_ascii_case(name)),
+            .any(|group_col| group_col == name),
         GpuExpr::AggCall {
             func: AggFunc::Sum, ..
         } => false,

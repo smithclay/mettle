@@ -11,11 +11,9 @@ use super::super::super::ir::GpuJoinStrategy;
 use super::super::join_plan::{
     membership_filter_bit_count, should_apply_resident_membership_filter,
 };
-use super::super::{
-    build_join_result_from_gpu_indices, choose_gpu_join_strategy, execute_from_lookup,
-};
+use super::super::{choose_gpu_join_strategy, execute_from_lookup};
 use super::setup::FastPathPlan;
-use super::super::topk::ExperimentalGroupedTopKMode;
+use super::super::topk::CandidateTopKMode;
 use super::{FastPathCtx, PhaseFlow};
 
 /// Output of Phase 2: which source indices are still live, and whether we
@@ -212,7 +210,7 @@ pub(super) struct FinalizedJoin {
     #[allow(dead_code)]
     pub final_row_source_idx: usize,
     pub candidate_representative_row_ids: Option<metal::GpuVector>,
-    pub candidate_mode: Option<ExperimentalGroupedTopKMode>,
+    pub candidate_mode: Option<CandidateTopKMode>,
     pub fused_revenue_columns: Option<(String, String)>,
     pub needs_materialized_sum: bool,
     pub secondary_order_gpu: metal::GpuBuffer,
@@ -305,32 +303,15 @@ pub(super) fn finalize_join(
 
     let fused_revenue_columns = super::super::resolve::fused_mul_one_minus_columns(sum_expr)
         .map(|(a, b)| (a.to_owned(), b.to_owned()));
-    let candidate_mode = derived.requested_candidate_mode.or_else(|| {
-        if derived.candidate_topk.is_some() {
-            Some(if fused_revenue_columns.is_some() {
-                ExperimentalGroupedTopKMode::SlotFusedGpuTopK
-            } else {
-                ExperimentalGroupedTopKMode::CandidateCompact
-            })
+    let candidate_mode = derived.candidate_topk.as_ref().map(|_| {
+        if fused_revenue_columns.is_some() {
+            CandidateTopKMode::SlotFusedGpuTopK
         } else {
-            None
+            CandidateTopKMode::CandidateCompact
         }
     });
-    if candidate_mode == Some(ExperimentalGroupedTopKMode::GenericGroupedAggregate) {
-        let join_result =
-            build_join_result_from_gpu_indices(plan, pinned_tables, &joined_sources, gv_indices);
-        let materialized = execute_from_lookup(plan, &JoinResultLookup(&join_result), config)?
-            .ok_or_else(|| {
-                "fast-path fallback execute_from_lookup returned None for generic mode".to_owned()
-            })?;
-        return Ok(PhaseFlow::Fallback(materialized));
-    }
 
-    let needs_materialized_sum = !matches!(
-        candidate_mode,
-        Some(ExperimentalGroupedTopKMode::SlotFusedGpuTopK)
-            | Some(ExperimentalGroupedTopKMode::SlotFusedCpuTopK)
-    );
+    let needs_materialized_sum = !matches!(candidate_mode, Some(CandidateTopKMode::SlotFusedGpuTopK));
 
     // ── Phase 3: Project -> Aggregate -> Top-K, still on device ───────
     let representative_table = &pinned_tables[derived.representative_plan.table_idx];

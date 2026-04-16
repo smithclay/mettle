@@ -28,10 +28,23 @@ pub struct GpuJoin {
     pub right_col: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QualifiedColumn {
     pub table: Option<String>,
     pub column: String,
+}
+
+impl QualifiedColumn {
+    pub fn is_wildcard(&self) -> bool {
+        self.table.is_none() && self.column == "*"
+    }
+
+    pub fn display_name(&self) -> String {
+        match &self.table {
+            Some(table) => format!("{table}.{}", self.column),
+            None => self.column.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +71,7 @@ pub struct GpuProjection {
 
 #[derive(Debug, Clone)]
 pub enum GpuExpr {
-    Column(String),
+    Column(QualifiedColumn),
     Literal(GpuLiteral),
     BinaryOp {
         op: GpuBinOp,
@@ -89,7 +102,7 @@ pub enum AggFunc {
 
 #[derive(Debug, Clone)]
 pub struct GpuAggregate {
-    pub group_by: Vec<String>,
+    pub group_by: Vec<QualifiedColumn>,
     /// Parsed aggregate expressions. Exercised by planner unit tests;
     /// the executor derives aggregates via a different path.
     #[allow(dead_code)]
@@ -135,7 +148,7 @@ pub(super) enum GroupedAggregateOutput {
 
 #[derive(Debug, Clone)]
 pub(super) struct GroupedAggregatePlan {
-    pub(super) group_by: Vec<String>,
+    pub(super) group_by: Vec<QualifiedColumn>,
     pub(super) aggregate_slots: Vec<AggregateSlotPlan>,
     pub(super) outputs: Vec<GroupedAggregateOutput>,
 }

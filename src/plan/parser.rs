@@ -47,12 +47,20 @@ pub fn try_build_gpu_plan(sql: &str) -> Option<GpuPlan> {
         sources.push(first_source);
 
         for join in &from_item.joins {
+            if !matches!(
+                join.join_operator,
+                ast::JoinOperator::Join(_) | ast::JoinOperator::Inner(_)
+            ) {
+                return None;
+            }
             let right_source = parse_table_factor(&join.relation)?;
             // Extract equi-join condition from ON clause.
             if let Some(join_cond) =
                 parse_join_constraint(&join.join_operator, &sources, &right_source)
             {
                 joins.push(join_cond);
+            } else {
+                return None;
             }
             sources.push(right_source);
         }
@@ -139,10 +147,7 @@ fn parse_join_constraint(
 ) -> Option<GpuJoin> {
     let constraint = match join_op {
         ast::JoinOperator::Join(c)
-        | ast::JoinOperator::Inner(c)
-        | ast::JoinOperator::LeftOuter(c)
-        | ast::JoinOperator::RightOuter(c)
-        | ast::JoinOperator::FullOuter(c, ..) => c,
+        | ast::JoinOperator::Inner(c) => c,
         ast::JoinOperator::CrossJoin => return None,
         _ => return None,
     };
@@ -375,11 +380,7 @@ fn extract_qualified_column_and_literal(
 }
 
 fn extract_column_name(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Identifier(ident) => Some(ident.value.clone()),
-        Expr::CompoundIdentifier(parts) => Some(parts.last()?.value.clone()),
-        _ => None,
-    }
+    Some(extract_qualified_column(expr)?.column)
 }
 
 fn extract_literal(expr: &Expr) -> Option<GpuLiteral> {
@@ -456,13 +457,13 @@ fn negate_literal(lit: GpuLiteral) -> GpuLiteral {
     }
 }
 
-fn parse_group_by(group_by: &GroupByExpr) -> Option<Vec<String>> {
+fn parse_group_by(group_by: &GroupByExpr) -> Option<Vec<QualifiedColumn>> {
     match group_by {
         GroupByExpr::All(_) => None,
         GroupByExpr::Expressions(exprs, _) => {
             let mut cols = Vec::new();
             for expr in exprs {
-                cols.push(extract_column_name(expr)?);
+                cols.push(extract_qualified_column(expr)?);
             }
             Some(cols)
         }
@@ -471,7 +472,7 @@ fn parse_group_by(group_by: &GroupByExpr) -> Option<Vec<String>> {
 
 fn parse_select_items(
     items: &[SelectItem],
-    group_by_columns: &[String],
+    group_by_columns: &[QualifiedColumn],
 ) -> Option<(Vec<GpuProjection>, Vec<GpuAggExpr>)> {
     let mut projections = Vec::new();
     let mut agg_exprs = Vec::new();
@@ -505,11 +506,11 @@ fn parse_select_items(
 fn parse_select_expr(
     expr: &Expr,
     alias: Option<&str>,
-    group_by_columns: &[String],
+    group_by_columns: &[QualifiedColumn],
 ) -> Option<(GpuProjection, Option<GpuAggExpr>)> {
     // Direct column reference.
-    if let Some(col) = extract_column_name(expr) {
-        let name = alias.unwrap_or(col.as_str()).to_owned();
+    if let Some(col) = extract_qualified_column(expr) {
+        let name = alias.unwrap_or(col.column.as_str()).to_owned();
         return Some((
             GpuProjection {
                 alias: name,
@@ -594,7 +595,7 @@ fn parse_select_expr(
 /// Recursively parse a SQL expression into a GpuExpr.
 fn parse_gpu_expr(expr: &Expr) -> Option<GpuExpr> {
     // Column reference.
-    if let Some(col) = extract_column_name(expr) {
+    if let Some(col) = extract_qualified_column(expr) {
         return Some(GpuExpr::Column(col));
     }
     // Literal.
@@ -634,7 +635,7 @@ fn parse_gpu_expr(expr: &Expr) -> Option<GpuExpr> {
 
 fn format_gpu_expr(expr: &GpuExpr) -> String {
     match expr {
-        GpuExpr::Column(c) => c.clone(),
+        GpuExpr::Column(c) => c.display_name(),
         GpuExpr::Literal(GpuLiteral::Int(i)) => i.to_string(),
         GpuExpr::Literal(GpuLiteral::Float(f)) => f.to_string(),
         GpuExpr::Literal(GpuLiteral::Str(s)) => format!("'{s}'"),
@@ -669,18 +670,27 @@ fn format_gpu_expr(expr: &GpuExpr) -> String {
 /// the argument (column, expression, or a dummy Column("*") for COUNT(*)).
 fn parse_agg_arg(args: &ast::FunctionArguments) -> Option<GpuExpr> {
     match args {
-        ast::FunctionArguments::None => Some(GpuExpr::Column("*".to_owned())),
+        ast::FunctionArguments::None => Some(GpuExpr::Column(QualifiedColumn {
+            table: None,
+            column: "*".to_owned(),
+        })),
         ast::FunctionArguments::List(arg_list) => {
             if arg_list.args.is_empty() {
-                return Some(GpuExpr::Column("*".to_owned()));
+                return Some(GpuExpr::Column(QualifiedColumn {
+                    table: None,
+                    column: "*".to_owned(),
+                }));
             }
             if arg_list.args.len() != 1 {
                 return None;
             }
             match &arg_list.args[0] {
-                FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
-                    Some(GpuExpr::Column("*".to_owned()))
-                }
+                FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => Some(GpuExpr::Column(
+                    QualifiedColumn {
+                        table: None,
+                        column: "*".to_owned(),
+                    },
+                )),
                 FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => parse_gpu_expr(expr),
                 _ => None,
             }

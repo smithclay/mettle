@@ -12,7 +12,7 @@ use crate::source_cache;
 
 use super::super::helpers::{compute_filter_indices, refs_eq};
 use super::super::ir::{
-    GpuExpr, GpuJoinStrategy, GpuPlan, JoinExecutionStep, SourceSelection,
+    GpuExpr, GpuJoinStrategy, GpuPlan, JoinExecutionStep, QualifiedColumn, SourceSelection,
 };
 use super::cache::source_filter_cache_key;
 use super::resolve::{
@@ -140,15 +140,15 @@ pub(super) fn find_join_for_source(
 }
 
 fn mark_column_source(
-    name: &str,
+    column: &QualifiedColumn,
     plan: &GpuPlan,
     pinned_tables: &[Arc<PinnedTable>],
     live_sources: &mut [bool],
 ) {
-    if name == "*" {
+    if column.is_wildcard() {
         return;
     }
-    if let Some((table_idx, _)) = resolve_column_name_in_sources(name, plan, pinned_tables) {
+    if let Some((table_idx, _)) = resolve_column_name_in_sources(column, plan, pinned_tables) {
         live_sources[table_idx] = true;
     }
 }
@@ -160,7 +160,7 @@ fn mark_expr_sources(
     live_sources: &mut [bool],
 ) {
     match expr {
-        GpuExpr::Column(name) => mark_column_source(name, plan, pinned_tables, live_sources),
+        GpuExpr::Column(column) => mark_column_source(column, plan, pinned_tables, live_sources),
         GpuExpr::Literal(_) => {}
         GpuExpr::BinaryOp { left, right, .. } => {
             mark_expr_sources(left, plan, pinned_tables, live_sources);
@@ -188,7 +188,15 @@ fn output_live_sources(
     }
 
     for order_by in &plan.order_by {
-        mark_column_source(&order_by.column, plan, pinned_tables, &mut live_sources);
+        mark_column_source(
+            &QualifiedColumn {
+                table: None,
+                column: order_by.column.clone(),
+            },
+            plan,
+            pinned_tables,
+            &mut live_sources,
+        );
     }
 
     for &source_idx in extra_live_sources {
@@ -253,7 +261,7 @@ pub(super) fn build_source_selections(
     for (src_idx, src) in plan.sources.iter().enumerate() {
         let table = &pinned_tables[src_idx];
         let src_ref = src.alias.as_deref().unwrap_or(src.name.as_str());
-        let src_filters = source_filters(plan, table, src_ref);
+        let src_filters = source_filters(plan, pinned_tables, table, src_ref);
         let indices = if src_filters.is_empty() {
             (0..table.row_count).collect()
         } else if let Some(cache_key) = source_filter_cache_key(table, &src_filters) {

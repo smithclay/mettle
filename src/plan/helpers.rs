@@ -15,13 +15,16 @@ use crate::config::BufferConfig;
 use crate::metal::{self, GpuVector, ScalarCompareOp, ScalarProjectOp};
 use crate::pinned::{PinnedColumn, PinnedTable};
 
-use super::ir::{AggFunc, AggregateStateKind, GpuBinOp, GpuExpr, GpuFilter, GpuLiteral, GpuOrderBy};
+use super::ir::{
+    AggFunc, AggregateStateKind, GpuBinOp, GpuExpr, GpuFilter, GpuLiteral, GpuOrderBy,
+    QualifiedColumn,
+};
 
 /// Abstraction for looking up pinned columns by name. Each column comes
 /// with its own index array for late materialization — the caller gathers
 /// from the original pinned data using these indices.
 pub(super) trait ColumnLookup {
-    fn get_column(&self, name: &str) -> Option<(&PinnedColumn, &[usize])>;
+    fn get_column(&self, column: &QualifiedColumn) -> Option<(&PinnedColumn, &[usize])>;
     fn row_count(&self) -> usize;
     fn gpu_relation_bindings(&self) -> Option<(&[(String, Arc<PinnedTable>)], &[Vec<usize>])> {
         None
@@ -45,16 +48,16 @@ impl JoinResult {
         self.table_indices.first().map(|v| v.len()).unwrap_or(0)
     }
 
-    fn resolve_column(&self, name: &str) -> Option<(usize, &PinnedColumn)> {
-        resolve_column_gpu(name, &self.tables)
+    fn resolve_column(&self, column: &QualifiedColumn) -> Option<(usize, &PinnedColumn)> {
+        resolve_column_gpu(column, &self.tables)
     }
 }
 
 pub(super) struct JoinResultLookup<'a>(pub(super) &'a JoinResult);
 
 impl ColumnLookup for JoinResultLookup<'_> {
-    fn get_column(&self, name: &str) -> Option<(&PinnedColumn, &[usize])> {
-        let (table_idx, col) = self.0.resolve_column(name)?;
+    fn get_column(&self, column: &QualifiedColumn) -> Option<(&PinnedColumn, &[usize])> {
+        let (table_idx, col) = self.0.resolve_column(column)?;
         Some((col, &self.0.table_indices[table_idx]))
     }
     fn row_count(&self) -> usize {
@@ -67,22 +70,29 @@ impl ColumnLookup for JoinResultLookup<'_> {
 
 /// Resolve a column name to (table_index, column) across a set of table refs.
 pub(super) fn resolve_column_gpu<'a>(
-    name: &str,
+    column: &QualifiedColumn,
     table_refs: &'a [(String, Arc<PinnedTable>)],
 ) -> Option<(usize, &'a PinnedColumn)> {
-    let name_lower = name.to_lowercase();
-    for (t, (alias, table)) in table_refs.iter().enumerate() {
-        let prefix = format!("{}.", alias.to_lowercase());
-        if let Some(col_name) = name_lower.strip_prefix(&prefix) {
-            if let Some(col) = table.column(col_name) {
-                return Some((t, col));
+    let column_name = column.column.to_lowercase();
+    if let Some(table_ref) = column.table.as_deref() {
+        for (t, (alias, table)) in table_refs.iter().enumerate() {
+            if refs_eq(table_ref, alias) {
+                return table.column(&column_name).map(|col| (t, col));
             }
         }
-        if let Some(col) = table.column(&name_lower) {
-            return Some((t, col));
+        return None;
+    }
+
+    let mut match_result = None;
+    for (t, (_, table)) in table_refs.iter().enumerate() {
+        if let Some(col) = table.column(&column_name) {
+            if match_result.is_some() {
+                return None;
+            }
+            match_result = Some((t, col));
         }
     }
-    None
+    match_result
 }
 
 pub(super) fn aggregate_state_kind(func: AggFunc) -> AggregateStateKind {
@@ -135,8 +145,8 @@ pub(super) fn evaluate_expr_gv(
     config: &BufferConfig,
 ) -> Result<Option<GpuVector>, Box<dyn Error>> {
     match expr {
-        GpuExpr::Column(name) => {
-            let (tidx, col) = match resolve_column_gpu(name, table_refs) {
+        GpuExpr::Column(column) => {
+            let (tidx, col) = match resolve_column_gpu(column, table_refs) {
                 Some(r) => r,
                 None => return Ok(None),
             };
@@ -227,10 +237,12 @@ pub(super) fn evaluate_expr(
     config: &BufferConfig,
 ) -> Result<Vec<f64>, Box<dyn Error>> {
     match expr {
-        GpuExpr::Column(col_name) => {
+        GpuExpr::Column(column) => {
             let (col, indices) = lookup
-                .get_column(col_name)
-                .ok_or_else(|| format!("pinned table missing column {col_name:?}"))?;
+                .get_column(column)
+                .ok_or_else(|| {
+                    format!("pinned table missing column {:?}", column.display_name())
+                })?;
             Ok(gather_column_as_f64(col, indices))
         }
         GpuExpr::Literal(lit) => {
@@ -284,8 +296,8 @@ fn try_scalar_projection(
     config: &BufferConfig,
 ) -> Result<Option<Vec<f64>>, Box<dyn Error>> {
     let (col_name, scalar_val, scalar_on_left) = match (left, right) {
-        (GpuExpr::Column(c), GpuExpr::Literal(lit)) => (c.as_str(), literal_as_f64(lit), false),
-        (GpuExpr::Literal(lit), GpuExpr::Column(c)) => (c.as_str(), literal_as_f64(lit), true),
+        (GpuExpr::Column(c), GpuExpr::Literal(lit)) => (c, literal_as_f64(lit), false),
+        (GpuExpr::Literal(lit), GpuExpr::Column(c)) => (c, literal_as_f64(lit), true),
         _ => return Ok(None),
     };
 

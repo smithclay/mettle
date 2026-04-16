@@ -14,9 +14,8 @@ use super::super::cache::{
 };
 use super::super::join_plan::{join_execution_steps, live_sources_after_join_steps};
 use super::super::topk::{
-    build_representative_materialize_plan, candidate_grouped_topk_plan,
-    experimental_grouped_topk_mode, is_grouped_topk_pilot, materialize_grouped_topk_result,
-    CandidateGroupedTopKPlan, ExperimentalGroupedTopKMode, GroupedTopKPlan,
+    build_representative_materialize_plan, candidate_grouped_topk_plan, is_grouped_topk_pilot,
+    materialize_grouped_topk_result, CandidateGroupedTopKPlan, GroupedTopKPlan,
     RepresentativeMaterializePlan,
 };
 use super::{FastPathCtx, PhaseFlow};
@@ -34,7 +33,6 @@ pub(super) struct FastPathPlan {
     pub join_output_cache_key: Option<String>,
     pub grouped_topk_result_cache_key: String,
     pub use_candidate_topk: bool,
-    pub requested_candidate_mode: Option<ExperimentalGroupedTopKMode>,
 }
 
 impl FastPathPlan {
@@ -100,12 +98,7 @@ pub(super) fn derive_plan(
         &grouped_agg_plan,
         &representative_plan,
     );
-    let requested_candidate_mode = experimental_grouped_topk_mode();
-    let use_candidate_topk = candidate_topk.is_some()
-        && !matches!(
-            requested_candidate_mode,
-            Some(ExperimentalGroupedTopKMode::GenericGroupedAggregate)
-        );
+    let use_candidate_topk = candidate_topk.is_some();
     let join_output_cache_key = if use_candidate_topk {
         candidate_topk.as_ref().map(|candidate_topk| {
             join_output_cache_key(
@@ -166,7 +159,6 @@ pub(super) fn derive_plan(
         join_output_cache_key,
         grouped_topk_result_cache_key,
         use_candidate_topk,
-        requested_candidate_mode,
     }))
 }
 

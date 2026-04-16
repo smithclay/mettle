@@ -22,7 +22,7 @@ pub(super) fn build_filter_gv_indices(
     for (src_idx, src) in plan.sources.iter().enumerate() {
         let table = &pinned_tables[src_idx];
         let src_ref = src.alias.as_deref().unwrap_or(src.name.as_str());
-        let src_filters = source_filters(plan, table, src_ref);
+        let src_filters = source_filters(plan, ctx.pinned_tables, table, src_ref);
         let selection = source_selections.map(|selections| &selections[src_idx]);
 
         let has_cpu_filter = src_filters.iter().any(|f| {

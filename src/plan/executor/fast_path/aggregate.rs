@@ -6,10 +6,12 @@ use std::time::Instant;
 use crate::metal::{self, GpuVector};
 
 use super::super::super::helpers::{evaluate_expr_gv, resolve_column_gpu};
-use super::super::super::ir::{AggFunc, AggregateInputPlan, AggregateSlotPlan, GpuJoinStrategy};
-use super::super::cache::{profile_enabled, profile_log};
+use super::super::super::ir::{
+    AggFunc, AggregateInputPlan, AggregateSlotPlan, GpuJoinStrategy, QualifiedColumn,
+};
+use super::super::cache::profile_enabled;
 use super::super::choose_gpu_join_strategy;
-use super::super::topk::{grouped_candidate_better, ExperimentalGroupedTopKMode};
+use super::super::topk::CandidateTopKMode;
 use super::join_loop::FinalizedJoin;
 use super::setup::FastPathPlan;
 use super::{FastPathCtx, FastPathTopKOutput, PhaseFlow};
@@ -38,7 +40,13 @@ pub(super) fn compute_sum_gv(
     };
 
     let sum_gv = if let Some((price_name, discount_name)) = &finalized.fused_revenue_columns {
-        let (price_tidx, price_col) = match resolve_column_gpu(price_name, &ctx.table_refs) {
+        let (price_tidx, price_col) = match resolve_column_gpu(
+            &QualifiedColumn {
+                table: None,
+                column: (*price_name).to_owned(),
+            },
+            &ctx.table_refs,
+        ) {
             Some(r) => r,
             None => {
                 metal::end_batch(config)?;
@@ -46,7 +54,13 @@ pub(super) fn compute_sum_gv(
             }
         };
         let (discount_tidx, discount_col) =
-            match resolve_column_gpu(discount_name, &ctx.table_refs) {
+            match resolve_column_gpu(
+                &QualifiedColumn {
+                    table: None,
+                    column: (*discount_name).to_owned(),
+                },
+                &ctx.table_refs,
+            ) {
                 Some(r) => r,
                 None => {
                     metal::end_batch(config)?;
@@ -82,11 +96,9 @@ pub(super) fn run_topk(
     finalized: &FinalizedJoin,
     gv_indices: &[metal::GpuVector],
     sum_gv: Option<&GpuVector>,
-    encode_agg_start: Instant,
 ) -> Result<PhaseFlow<FastPathTopKOutput>, Box<dyn Error>> {
     let pinned_tables = ctx.pinned_tables;
     let config = ctx.config;
-    let profile = ctx.profile;
     let grouped_topk = &derived.grouped_topk;
     let representative_plan = &derived.representative_plan;
     let representative_table = &pinned_tables[representative_plan.table_idx];
@@ -148,37 +160,18 @@ pub(super) fn run_topk(
             }
         };
         match finalized.candidate_mode {
-            Some(ExperimentalGroupedTopKMode::SlotValuesGpuTopK) => {
-                let dense_sums = metal::accumulate_dense_slots_gv(
-                    &matches,
-                    sum_gv.expect("slot values path requires materialized aggregate input"),
-                    candidate_row_ids,
-                    config,
-                )?;
-                let dense_rows = metal::GpuDenseGroupedRows {
-                    representative_row_ids: candidate_row_ids.clone(),
-                    secondary_order_values: candidate_secondary_order_values,
-                    aggregate_values: dense_sums,
-                };
-                let dense_topk = metal::topk_dense_grouped_rows(
-                    &dense_rows,
-                    grouped_topk.limit,
-                    grouped_topk.secondary_order_group_idx.is_some(),
-                    config,
-                )?;
-                FastPathTopKOutput::Gpu {
-                    row_ids: dense_topk.representative_row_ids,
-                    aggregate_values: dense_topk.aggregate_values,
-                }
-            }
-            Some(ExperimentalGroupedTopKMode::SlotFusedGpuTopK)
-            | Some(ExperimentalGroupedTopKMode::SlotFusedCpuTopK) => {
+            Some(CandidateTopKMode::SlotFusedGpuTopK) => {
                 let Some((price_name, discount_name)) = &finalized.fused_revenue_columns else {
                     metal::end_batch(config)?;
                     return Ok(PhaseFlow::Bail);
                 };
-                let (price_tidx, price_col) = match resolve_column_gpu(price_name, &ctx.table_refs)
-                {
+                let (price_tidx, price_col) = match resolve_column_gpu(
+                    &QualifiedColumn {
+                        table: None,
+                        column: (*price_name).to_owned(),
+                    },
+                    &ctx.table_refs,
+                ) {
                     Some(r) => r,
                     None => {
                         metal::end_batch(config)?;
@@ -186,7 +179,13 @@ pub(super) fn run_topk(
                     }
                 };
                 let (discount_tidx, discount_col) =
-                    match resolve_column_gpu(discount_name, &ctx.table_refs) {
+                    match resolve_column_gpu(
+                        &QualifiedColumn {
+                            table: None,
+                            column: (*discount_name).to_owned(),
+                        },
+                        &ctx.table_refs,
+                    ) {
                         Some(r) => r,
                         None => {
                             metal::end_batch(config)?;
@@ -210,75 +209,23 @@ pub(super) fn run_topk(
                     config,
                 )?;
                 let use_secondary = grouped_topk.secondary_order_group_idx.is_some();
-                if finalized.candidate_mode == Some(ExperimentalGroupedTopKMode::SlotFusedCpuTopK) {
-                    profile_log(profile, "encode aggregate+topk", encode_agg_start);
-                    let agg_wait_start = Instant::now();
-                    metal::end_batch(config)?;
-                    profile_log(profile, "execute aggregate+topk", agg_wait_start);
-
-                    let dense_count = dense_sums.download_count();
-                    let representative_row_ids: Vec<u32> =
-                        candidate_row_ids.download_data_as(dense_count);
-                    let secondary_values: Vec<i32> =
-                        candidate_secondary_order_values.download_data_as(dense_count);
-                    let aggregate_values: Vec<f32> = dense_sums.download_data_as(dense_count);
-
-                    let mut ranked: Vec<(u32, f32, i32)> = representative_row_ids
-                        .into_iter()
-                        .zip(aggregate_values)
-                        .zip(secondary_values)
-                        .map(|((row_id, sum), secondary)| (row_id, sum, secondary))
-                        .filter(|(_, sum, _)| *sum != 0.0)
-                        .collect();
-                    ranked.sort_by(|lhs, rhs| {
-                        let lhs_better = grouped_candidate_better(
-                            lhs.1,
-                            lhs.2,
-                            lhs.0,
-                            rhs.1,
-                            rhs.2,
-                            rhs.0,
-                            use_secondary,
-                        );
-                        let rhs_better = grouped_candidate_better(
-                            rhs.1,
-                            rhs.2,
-                            rhs.0,
-                            lhs.1,
-                            lhs.2,
-                            lhs.0,
-                            use_secondary,
-                        );
-                        match (lhs_better, rhs_better) {
-                            (true, false) => std::cmp::Ordering::Less,
-                            (false, true) => std::cmp::Ordering::Greater,
-                            _ => std::cmp::Ordering::Equal,
-                        }
-                    });
-                    ranked.truncate(grouped_topk.limit);
-                    FastPathTopKOutput::Cpu {
-                        row_ids: ranked.iter().map(|(row_id, _, _)| *row_id).collect(),
-                        aggregate_values: ranked.iter().map(|(_, sum, _)| *sum).collect(),
-                    }
-                } else {
-                    let dense_rows = metal::GpuDenseGroupedRows {
-                        representative_row_ids: candidate_row_ids.clone(),
-                        secondary_order_values: candidate_secondary_order_values,
-                        aggregate_values: dense_sums,
-                    };
-                    let dense_topk = metal::topk_dense_grouped_rows(
-                        &dense_rows,
-                        grouped_topk.limit,
-                        use_secondary,
-                        config,
-                    )?;
-                    FastPathTopKOutput::Gpu {
-                        row_ids: dense_topk.representative_row_ids,
-                        aggregate_values: dense_topk.aggregate_values,
-                    }
+                let dense_rows = metal::GpuDenseGroupedRows {
+                    representative_row_ids: candidate_row_ids.clone(),
+                    secondary_order_values: candidate_secondary_order_values,
+                    aggregate_values: dense_sums,
+                };
+                let dense_topk = metal::topk_dense_grouped_rows(
+                    &dense_rows,
+                    grouped_topk.limit,
+                    use_secondary,
+                    config,
+                )?;
+                FastPathTopKOutput {
+                    row_ids: dense_topk.representative_row_ids,
+                    aggregate_values: dense_topk.aggregate_values,
                 }
             }
-            Some(ExperimentalGroupedTopKMode::CandidateCompact) | None => {
+            Some(CandidateTopKMode::CandidateCompact) | None => {
                 let diag = profile_enabled();
                 // [DIAG] flush candidate hash_join phase
                 if diag {
@@ -324,12 +271,11 @@ pub(super) fn run_topk(
                     &dense_topk.representative_row_ids,
                     config,
                 )?;
-                FastPathTopKOutput::Gpu {
+                FastPathTopKOutput {
                     row_ids: actual_row_ids,
                     aggregate_values: dense_topk.aggregate_values,
                 }
             }
-            Some(ExperimentalGroupedTopKMode::GenericGroupedAggregate) => unreachable!(),
         }
     } else {
         let topk_rows = metal::aggregate_topk_grouped_rows_gv(
@@ -340,7 +286,7 @@ pub(super) fn run_topk(
             grouped_topk.secondary_order_group_idx.is_some(),
             config,
         )?;
-        FastPathTopKOutput::Gpu {
+        FastPathTopKOutput {
             row_ids: topk_rows.representative_row_ids,
             aggregate_values: topk_rows.aggregate_values,
         }

@@ -1006,20 +1006,6 @@ kernel void project_revenue_from_indices_v(
     output[gid] = extendedprice[row] * (1.0f - discount[row]);
 }
 
-kernel void accumulate_dense_slots_v(
-    device const int* slot_ids [[buffer(0)]],
-    device const float* values [[buffer(1)]],
-    device atomic_uint* sums [[buffer(2)]],
-    device const uint* count [[buffer(3)]],
-    constant uint& slot_count [[buffer(4)]],
-    uint gid [[thread_position_in_grid]]
-) {
-    if (gid >= count[0]) return;
-    int slot = slot_ids[gid];
-    if (slot < 0 || uint(slot) >= slot_count) return;
-    atomic_add_float(&sums[slot], values[gid]);
-}
-
 kernel void accumulate_revenue_dense_slots_from_indices_v(
     device const int* slot_ids [[buffer(0)]],
     device const float* extendedprice [[buffer(1)]],

@@ -559,17 +559,6 @@ pub fn project_revenue_from_indices_gv(
     })
 }
 
-pub fn accumulate_dense_slots_gv(
-    slot_ids: &GpuVector,
-    values: &GpuVector,
-    dense_rows: &GpuVector,
-    config: &BufferConfig,
-) -> Result<GpuVector> {
-    with_runtime(config.cache_region_bytes, |rt| {
-        rt.accumulate_dense_slots_gv(slot_ids, values, dense_rows)
-    })
-}
-
 pub fn accumulate_revenue_dense_slots_from_indices_gv(
     slot_ids: &GpuVector,
     extendedprice: &GpuBuffer,

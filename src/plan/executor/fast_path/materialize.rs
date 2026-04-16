@@ -27,26 +27,17 @@ pub(super) fn finalize(
     let config = ctx.config;
     let profile = ctx.profile;
 
-    let (representative_row_ids, aggregate_vals) = match topk_output {
-        FastPathTopKOutput::Gpu {
-            row_ids,
-            aggregate_values,
-        } => {
-            profile_log(profile, "encode aggregate+topk", encode_agg_start);
-            let agg_wait_start = Instant::now();
-            metal::end_batch(config)?;
-            profile_log(profile, "execute aggregate+topk", agg_wait_start);
-            let final_count = aggregate_values.download_count();
-            (
-                row_ids.download_data_as(final_count),
-                aggregate_values.download_data_as(final_count),
-            )
-        }
-        FastPathTopKOutput::Cpu {
-            row_ids,
-            aggregate_values,
-        } => (row_ids, aggregate_values),
-    };
+    let FastPathTopKOutput {
+        row_ids,
+        aggregate_values,
+    } = topk_output;
+    profile_log(profile, "encode aggregate+topk", encode_agg_start);
+    let agg_wait_start = Instant::now();
+    metal::end_batch(config)?;
+    profile_log(profile, "execute aggregate+topk", agg_wait_start);
+    let final_count = aggregate_values.download_count();
+    let representative_row_ids: Vec<u32> = row_ids.download_data_as(final_count);
+    let aggregate_vals: Vec<f32> = aggregate_values.download_data_as(final_count);
 
     let materialize_start = Instant::now();
     let final_count = aggregate_vals.len();

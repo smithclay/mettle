@@ -35,7 +35,7 @@ pub(super) fn build_grouped_aggregate_plan(
                 let group_idx = agg
                     .group_by
                     .iter()
-                    .position(|group_col| group_col.eq_ignore_ascii_case(name))?;
+                    .position(|group_col| group_col == name)?;
                 outputs.push(GroupedAggregateOutput::GroupKey {
                     group_idx,
                     alias: proj.alias.clone(),
@@ -43,7 +43,7 @@ pub(super) fn build_grouped_aggregate_plan(
             }
             GpuExpr::AggCall { func, arg } => {
                 let input = if *func == AggFunc::Count
-                    && matches!(arg.as_ref(), GpuExpr::Column(c) if c == "*")
+                    && matches!(arg.as_ref(), GpuExpr::Column(c) if c.is_wildcard())
                 {
                     AggregateInputPlan::CountStar
                 } else {
@@ -118,9 +118,9 @@ pub(super) fn execute_aggregate_impl(
         .group_by
         .iter()
         .map(|name| {
-            lookup
-                .get_column(name)
-                .ok_or_else(|| format!("pinned table missing group-by column {name:?}").into())
+            lookup.get_column(name).ok_or_else(|| {
+                format!("pinned table missing group-by column {:?}", name.display_name()).into()
+            })
         })
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
 
@@ -170,7 +170,9 @@ pub(super) fn execute_aggregate_impl(
                 let col_name = &grouped_plan.group_by[*group_idx];
                 let (col, col_indices) = lookup
                     .get_column(col_name)
-                    .ok_or_else(|| format!("pinned table missing column {col_name:?}"))?;
+                    .ok_or_else(|| {
+                        format!("pinned table missing column {:?}", col_name.display_name())
+                    })?;
                 let representative_indices: Vec<usize> =
                     group_positions.iter().map(|g| col_indices[g[0]]).collect();
                 fields.push(Field::new(alias, column_arrow_type(col), false));
@@ -513,7 +515,7 @@ fn compute_ungrouped_agg(
     config: &BufferConfig,
 ) -> Result<Option<f64>, Box<dyn Error>> {
     let num_rows = lookup.row_count();
-    if func == AggFunc::Count && matches!(arg, GpuExpr::Column(c) if c == "*") {
+    if func == AggFunc::Count && matches!(arg, GpuExpr::Column(c) if c.is_wildcard()) {
         return Ok(Some(num_rows as f64));
     }
 

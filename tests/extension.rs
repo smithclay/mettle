@@ -1049,6 +1049,95 @@ fn gpu_processing_falls_back_for_unpinned_tables() {
     );
 }
 
+#[test]
+fn gpu_processing_preserves_qualified_duplicate_column_bindings() {
+    let _guard = test_lock();
+    reset_runtime_state_for_tests();
+    let connection = Connection::open_in_memory().unwrap();
+    register_extension(&connection).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE left_t(id INTEGER, shared_id INTEGER);
+             INSERT INTO left_t VALUES (1, 10), (2, 20);
+             CREATE TABLE right_t(id INTEGER, shared_id INTEGER);
+             INSERT INTO right_t VALUES (100, 10), (200, 20);",
+        )
+        .unwrap();
+    connection
+        .execute_batch("CALL gpu_buffer_init('64 KB', '128 KB', pinned_memory_size = '256 KB')")
+        .unwrap();
+    connection
+        .execute_batch("CALL gpu_register_table('left_t')")
+        .unwrap();
+    connection
+        .execute_batch("CALL gpu_register_table('right_t')")
+        .unwrap();
+
+    let mut stmt = connection
+        .prepare(
+            "CALL gpu_processing('SELECT l.id AS left_id, r.id AS right_id
+                                  FROM left_t l
+                                  JOIN right_t r ON l.shared_id = r.shared_id
+                                  ORDER BY left_id')",
+        )
+        .unwrap();
+    let mut rows = stmt.query([]).unwrap();
+
+    let mut result: Vec<(i32, i32)> = Vec::new();
+    while let Some(row) = rows.next().unwrap() {
+        result.push((row.get(0).unwrap(), row.get(1).unwrap()));
+    }
+
+    assert_eq!(result, vec![(1, 100), (2, 200)]);
+    assert_eq!(last_execution_mode().as_deref(), Some("metal_generic_plan"));
+}
+
+#[test]
+fn gpu_processing_falls_back_for_outer_join_queries() {
+    let _guard = test_lock();
+    reset_runtime_state_for_tests();
+    let connection = Connection::open_in_memory().unwrap();
+    register_extension(&connection).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE left_t(id INTEGER, shared_id INTEGER);
+             INSERT INTO left_t VALUES (1, 10), (2, 20);
+             CREATE TABLE right_t(id INTEGER, shared_id INTEGER);
+             INSERT INTO right_t VALUES (100, 10);",
+        )
+        .unwrap();
+    connection
+        .execute_batch("CALL gpu_buffer_init('64 KB', '128 KB', pinned_memory_size = '256 KB')")
+        .unwrap();
+    connection
+        .execute_batch("CALL gpu_register_table('left_t')")
+        .unwrap();
+    connection
+        .execute_batch("CALL gpu_register_table('right_t')")
+        .unwrap();
+
+    let mut stmt = connection
+        .prepare(
+            "CALL gpu_processing('SELECT l.id AS left_id, r.id AS right_id
+                                  FROM left_t l
+                                  LEFT JOIN right_t r ON l.shared_id = r.shared_id
+                                  ORDER BY left_id')",
+        )
+        .unwrap();
+    let mut rows = stmt.query([]).unwrap();
+
+    let mut result: Vec<(i32, Option<i32>)> = Vec::new();
+    while let Some(row) = rows.next().unwrap() {
+        result.push((row.get(0).unwrap(), row.get(1).unwrap()));
+    }
+
+    assert_eq!(result, vec![(1, Some(100)), (2, None)]);
+    assert_eq!(
+        last_execution_mode().as_deref(),
+        Some("duckdb_cpu_fallback")
+    );
+}
+
 fn test_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))

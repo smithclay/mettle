@@ -27,7 +27,7 @@ use super::helpers::{
     ColumnLookup, JoinResult, JoinResultLookup, column_arrow_type, compute_filter_indices,
     evaluate_expr, gather_column, sort_record_batch,
 };
-use super::ir::{GpuExpr, GpuPlan, SourceSelection};
+use super::ir::{GpuExpr, GpuPlan, QualifiedColumn, SourceSelection};
 
 pub(in crate::plan) use join_plan::{
     choose_gpu_join_strategy, join_execution_steps, live_sources_after_join_steps,
@@ -147,7 +147,7 @@ fn execute_single_table_native(
         .alias
         .as_deref()
         .unwrap_or(plan.sources[0].name.as_str());
-    let all_filters = source_filters(plan, table, src_ref);
+    let all_filters = source_filters(plan, pinned_tables, table, src_ref);
     let indices = if all_filters.is_empty() {
         (0..table.row_count).collect()
     } else {
@@ -225,7 +225,7 @@ fn execute_from_lookup(
             GpuExpr::Column(col_name) => {
                 let (col, idx) = lookup
                     .get_column(col_name)
-                    .ok_or_else(|| format!("column {col_name:?} not found"))?;
+                    .ok_or_else(|| format!("column {:?} not found", col_name.display_name()))?;
                 output_columns.push(gather_column(col, idx));
             }
             GpuExpr::BinaryOp { .. } | GpuExpr::Literal(_) => {
@@ -251,38 +251,6 @@ fn execute_from_lookup(
         batch.schema(),
         vec![batch],
     )))
-}
-
-fn build_join_result_from_gpu_indices(
-    plan: &GpuPlan,
-    pinned_tables: &[Arc<PinnedTable>],
-    joined_sources: &[usize],
-    gv_indices: &[metal::GpuVector],
-) -> JoinResult {
-    let tables = joined_sources
-        .iter()
-        .map(|&src_idx| {
-            let source = &plan.sources[src_idx];
-            (
-                source.alias.as_deref().unwrap_or(&source.name).to_owned(),
-                pinned_tables[src_idx].clone(),
-            )
-        })
-        .collect();
-    let table_indices = joined_sources
-        .iter()
-        .map(|&src_idx| {
-            gv_indices[src_idx]
-                .download_data_as::<u32>(gv_indices[src_idx].download_count())
-                .into_iter()
-                .map(|idx| idx as usize)
-                .collect()
-        })
-        .collect();
-    JoinResult {
-        tables,
-        table_indices,
-    }
 }
 
 
@@ -329,7 +297,10 @@ fn execute_multi_table(
             // Extract build-side join key from original pinned table via index array.
             let build_lookup = JoinResultLookup(&join_result);
             let (build_col, build_indices) = build_lookup
-                .get_column(build_col_name.as_str())
+                .get_column(&QualifiedColumn {
+                    table: None,
+                    column: build_col_name.clone(),
+                })
                 .ok_or_else(|| {
                     format!("join key {build_col_name:?} not found in running result")
                 })?;
@@ -424,7 +395,9 @@ fn build_output_schema(
             GpuExpr::Column(col_name) => {
                 let (col, _) = lookup
                     .get_column(col_name)
-                    .ok_or_else(|| format!("pinned table missing column {col_name:?}"))?;
+                    .ok_or_else(|| {
+                        format!("pinned table missing column {:?}", col_name.display_name())
+                    })?;
                 column_arrow_type(col)
             }
             GpuExpr::BinaryOp { .. } | GpuExpr::Literal(_) => DataType::Float64,

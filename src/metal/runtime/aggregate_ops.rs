@@ -27,67 +27,6 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLComputeComm
 
 impl MetalRuntime {
     #[cfg(target_os = "macos")]
-    pub(in crate::metal) fn accumulate_dense_slots_gv(
-        &mut self,
-        slot_ids: &GpuVector,
-        values: &GpuVector,
-        dense_rows: &GpuVector,
-    ) -> Result<GpuVector> {
-        debug_assert_eq!(slot_ids.max_len, values.max_len);
-        if dense_rows.max_len == 0 {
-            let out = GpuBuffer {
-                buffer: allocate_buffer(&self.device, 4, "empty")?,
-                len: 0,
-                element_size: 4,
-            };
-            return Ok(GpuVector::inherited_with_dispatch(
-                out,
-                &dense_rows.count,
-                &dense_rows.dispatch_args,
-                0,
-            ));
-        }
-
-        let slot_count = u32::try_from(dense_rows.max_len)
-            .map_err(|_| MettleError::Processing("dense slot count overflowed u32".to_owned()))?;
-        let byte_len = dense_rows.max_len * std::mem::size_of::<u32>();
-        let sums = allocate_buffer(&self.device, byte_len, "dense slot sums")?;
-        unsafe {
-            std::ptr::write_bytes(sums.contents().as_ptr().cast::<u8>(), 0, byte_len);
-        }
-
-        if slot_ids.max_len > 0 {
-            let pipeline = self.pipeline("accumulate_dense_slots_v")?.clone();
-            let (cb, is_batch) = self.get_command_buffer()?;
-            let enc = cb
-                .computeCommandEncoder()
-                .ok_or_else(|| MettleError::MetalUnavailable("no encoder".into()))?;
-            enc.setComputePipelineState(&pipeline);
-            unsafe {
-                enc.setBuffer_offset_atIndex(Some(&slot_ids.data.buffer), 0, 0);
-                enc.setBuffer_offset_atIndex(Some(&values.data.buffer), 0, 1);
-                enc.setBuffer_offset_atIndex(Some(&sums), 0, 2);
-                enc.setBuffer_offset_atIndex(Some(&slot_ids.count.buffer), 0, 3);
-                enc.setBytes_length_atIndex(NonNull::from(&slot_count).cast::<c_void>(), 4, 4);
-            }
-            Self::dispatch_gv_indirect(&enc, &slot_ids.dispatch_args);
-            enc.endEncoding();
-            Self::commit_if_standalone(&cb, is_batch, "accumulate_dense_slots_gv")?;
-        }
-
-        Ok(GpuVector::inherited_with_dispatch(
-            GpuBuffer {
-                buffer: sums,
-                len: dense_rows.max_len,
-                element_size: 4,
-            },
-            &dense_rows.count,
-            &dense_rows.dispatch_args,
-            dense_rows.max_len,
-        ))
-    }
-
-    #[cfg(target_os = "macos")]
     pub(in crate::metal) fn accumulate_revenue_dense_slots_from_indices_gv(
         &mut self,
         slot_ids: &GpuVector,

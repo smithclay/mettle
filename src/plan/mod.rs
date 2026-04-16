@@ -35,6 +35,13 @@ mod tests {
     use super::ir::GpuJoinStrategy;
     use super::{AggFunc, GpuBinOp, GpuExpr, GpuLiteral, try_build_gpu_plan};
 
+    fn q(column: &str) -> super::QualifiedColumn {
+        super::QualifiedColumn {
+            table: None,
+            column: column.to_owned(),
+        }
+    }
+
     #[test]
     fn parses_simple_select() {
         let plan = try_build_gpu_plan("SELECT value FROM numbers WHERE value > 5").unwrap();
@@ -100,7 +107,7 @@ mod tests {
         )
         .unwrap();
         let agg = plan.aggregate.as_ref().unwrap();
-        assert_eq!(agg.group_by, vec!["key"]);
+        assert_eq!(agg.group_by, vec![q("key")]);
         assert_eq!(agg.agg_exprs.len(), 2);
         assert_eq!(plan.order_by.len(), 1);
         assert!(!plan.order_by[0].descending);
@@ -158,6 +165,11 @@ mod tests {
     #[test]
     fn rejects_or_predicate() {
         assert!(try_build_gpu_plan("SELECT a FROM t WHERE a > 5 OR a < 1").is_none());
+    }
+
+    #[test]
+    fn rejects_outer_join() {
+        assert!(try_build_gpu_plan("SELECT a FROM t1 LEFT JOIN t2 ON t1.id = t2.id").is_none());
     }
 
     #[test]
@@ -243,7 +255,7 @@ mod tests {
         .unwrap();
         assert!(plan.aggregate.is_some());
         let agg = plan.aggregate.as_ref().unwrap();
-        assert_eq!(agg.group_by, vec!["l_orderkey"]);
+        assert_eq!(agg.group_by, vec![q("l_orderkey")]);
         assert_eq!(agg.agg_exprs.len(), 1);
         // SUM(l_extendedprice * (1 - l_discount)) →
         //   AggCall(Sum, BinaryOp(Mul, Column, BinaryOp(Sub, Literal(1), Column)))
@@ -253,7 +265,7 @@ mod tests {
                 left,
                 right,
             } => {
-                assert!(matches!(left.as_ref(), GpuExpr::Column(c) if c == "l_extendedprice"));
+                assert!(matches!(left.as_ref(), GpuExpr::Column(c) if c.column == "l_extendedprice"));
                 assert!(matches!(
                     right.as_ref(),
                     GpuExpr::BinaryOp {

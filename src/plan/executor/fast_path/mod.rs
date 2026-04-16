@@ -45,16 +45,10 @@ pub(super) enum PhaseFlow<T> {
     Fallback(MaterializedQueryResult),
 }
 
-/// Result of the top-K phase; either on-device buffers or CPU vectors.
-pub(super) enum FastPathTopKOutput {
-    Gpu {
-        row_ids: GpuVector,
-        aggregate_values: GpuVector,
-    },
-    Cpu {
-        row_ids: Vec<u32>,
-        aggregate_values: Vec<f32>,
-    },
+/// Result of the top-K phase: on-device row IDs and aggregate values.
+pub(super) struct FastPathTopKOutput {
+    pub row_ids: GpuVector,
+    pub aggregate_values: GpuVector,
 }
 
 /// GPU-native pipeline: encode the entire filter-join chain into one Metal
@@ -135,18 +129,12 @@ pub(super) fn execute_gpu_native(
     };
 
     // ── Phase 3c: top-K ──────────────────────────────────────────────────
-    let topk_output = match aggregate::run_topk(
-        &ctx,
-        &derived,
-        &finalized,
-        &gv_indices,
-        sum_gv.as_ref(),
-        encode_agg_start,
-    )? {
-        PhaseFlow::Continue(v) => v,
-        PhaseFlow::Bail => return Ok(None),
-        PhaseFlow::Fallback(r) => return Ok(Some(r)),
-    };
+    let topk_output =
+        match aggregate::run_topk(&ctx, &derived, &finalized, &gv_indices, sum_gv.as_ref())? {
+            PhaseFlow::Continue(v) => v,
+            PhaseFlow::Bail => return Ok(None),
+            PhaseFlow::Fallback(r) => return Ok(Some(r)),
+        };
 
     // ── Phase 4: download + materialize ──────────────────────────────────
     materialize::finalize(&ctx, &derived, topk_output, encode_agg_start)

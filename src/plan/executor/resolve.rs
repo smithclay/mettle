@@ -7,7 +7,9 @@ use std::sync::Arc;
 use crate::pinned::{PinnedColumn, PinnedTable};
 
 use super::super::helpers::{column_name_only, refs_eq};
-use super::super::ir::{GpuBinOp, GpuExpr, GpuFilter, GpuLiteral, GpuPlan, ResolvedJoinEdge};
+use super::super::ir::{
+    GpuBinOp, GpuExpr, GpuFilter, GpuLiteral, GpuPlan, QualifiedColumn, ResolvedJoinEdge,
+};
 
 pub(super) fn resolve_column_in_sources<'a>(
     filter: &GpuFilter,
@@ -15,6 +17,7 @@ pub(super) fn resolve_column_in_sources<'a>(
     pinned_tables: &'a [Arc<PinnedTable>],
 ) -> Option<(usize, &'a PinnedColumn)> {
     let target_col = filter.column.to_lowercase();
+    let mut match_result = None;
     for (idx, source) in plan.sources.iter().enumerate() {
         if let Some(table_ref) = filter.table.as_deref() {
             let source_ref = source.alias.as_deref().unwrap_or(source.name.as_str());
@@ -23,35 +26,42 @@ pub(super) fn resolve_column_in_sources<'a>(
             }
         }
         if let Some(col) = pinned_tables[idx].column(&target_col) {
-            return Some((idx, col));
+            if filter.table.is_none() && match_result.is_some() {
+                return None;
+            }
+            match_result = Some((idx, col));
         }
     }
-    None
+    match_result
 }
 
 pub(super) fn resolve_column_name_in_sources<'a>(
-    name: &str,
+    column: &QualifiedColumn,
     plan: &'a GpuPlan,
     pinned_tables: &'a [Arc<PinnedTable>],
 ) -> Option<(usize, &'a PinnedColumn)> {
-    let lowered = name.to_lowercase();
-    if let Some((table_name, col_name)) = lowered.split_once('.') {
+    let col_name = column.column.to_lowercase();
+    if let Some(table_name) = column.table.as_deref() {
         for (idx, source) in plan.sources.iter().enumerate() {
             let source_ref = source.alias.as_deref().unwrap_or(source.name.as_str());
             if refs_eq(table_name, source_ref) || refs_eq(table_name, source.name.as_str()) {
-                if let Some(col) = pinned_tables[idx].column(col_name) {
+                if let Some(col) = pinned_tables[idx].column(&col_name) {
                     return Some((idx, col));
                 }
             }
         }
         return None;
     }
+    let mut match_result = None;
     for (idx, table) in pinned_tables.iter().enumerate() {
-        if let Some(col) = table.column(&lowered) {
-            return Some((idx, col));
+        if let Some(col) = table.column(&col_name) {
+            if match_result.is_some() {
+                return None;
+            }
+            match_result = Some((idx, col));
         }
     }
-    None
+    match_result
 }
 
 pub(super) fn resolve_join_endpoint(
@@ -86,13 +96,13 @@ pub(super) fn resolve_join_endpoint(
 }
 
 pub(super) fn find_equivalent_column_on_table(
-    name: &str,
+    column: &QualifiedColumn,
     target_table_idx: usize,
     plan: &GpuPlan,
     pinned_tables: &[Arc<PinnedTable>],
 ) -> Option<String> {
-    let (start_table_idx, _) = resolve_column_name_in_sources(name, plan, pinned_tables)?;
-    let start_column = column_name_only(name).to_lowercase();
+    let (start_table_idx, _) = resolve_column_name_in_sources(column, plan, pinned_tables)?;
+    let start_column = column.column.to_lowercase();
     if start_table_idx == target_table_idx
         && pinned_tables[target_table_idx]
             .column(&start_column)
@@ -142,14 +152,22 @@ pub(super) fn find_equivalent_column_on_table(
 
 pub(super) fn source_filters<'a>(
     plan: &'a GpuPlan,
+    pinned_tables: &[Arc<PinnedTable>],
     table: &PinnedTable,
     src_ref: &str,
 ) -> Vec<&'a GpuFilter> {
+    let source_idx = plan.sources.iter().position(|source| {
+        let source_name = source.alias.as_deref().unwrap_or(source.name.as_str());
+        refs_eq(source_name, src_ref) || refs_eq(source.name.as_str(), src_ref)
+    });
     plan.filters
         .iter()
         .filter(|filter| match filter.table.as_deref() {
             Some(table_ref) => refs_eq(table_ref, src_ref),
-            None => table.column(&filter.column).is_some(),
+            None => table.column(&filter.column).is_some()
+                && source_idx.is_some()
+                && resolve_column_in_sources(filter, plan, pinned_tables)
+                    .is_some_and(|(idx, _)| Some(idx) == source_idx),
         })
         .collect()
 }
@@ -256,7 +274,7 @@ pub(super) fn join_key_value(col: &PinnedColumn, row_idx: usize) -> Option<i32> 
 
 pub(super) fn fused_mul_one_minus_columns(expr: &GpuExpr) -> Option<(&str, &str)> {
     fn is_col(expr: &GpuExpr, expected: &str) -> bool {
-        matches!(expr, GpuExpr::Column(name) if column_name_only(name).eq_ignore_ascii_case(expected))
+        matches!(expr, GpuExpr::Column(name) if column_name_only(&name.column).eq_ignore_ascii_case(expected))
     }
 
     match expr {
